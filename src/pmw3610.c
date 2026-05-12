@@ -396,6 +396,24 @@ static int pmw3610_async_init_configure(const struct device *dev) {
         return err;
     }
 
+    /*
+     * Final motion-register flush. After writing CPI/performance/
+     * downshift the sensor may have set the motion-detected bit with
+     * stale accumulated deltas (configuration writes can wake the
+     * internal pipeline briefly). Read 0x02-0x05 once more so the
+     * first real IRQ after init delivers fresh deltas, not residue.
+     * Fixes a persistent up-left drift seen across reboots when the
+     * previous firmware left non-default values in chip registers.
+     */
+    for (uint8_t reg = 0x02; (reg <= 0x05) && !err; reg++) {
+        uint8_t buf[1];
+        err = pmw3610_read_reg(dev, reg, buf);
+    }
+    if (err) {
+        LOG_ERR("Final motion flush failed");
+        return err;
+    }
+
     return 0;
 }
 
