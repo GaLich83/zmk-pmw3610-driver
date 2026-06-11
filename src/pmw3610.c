@@ -62,8 +62,12 @@ static int pmw3610_read(const struct device *dev, uint8_t addr, uint8_t *value, 
 	const struct pixart_config *cfg = dev->config;
 	const struct spi_buf tx_buf = { .buf = &addr, .len = sizeof(addr) };
 	const struct spi_buf_set tx = { .buffers = &tx_buf, .count = 1 };
+	/* Half-duplex (3-wire SPI): nRF SPIM sends tx, then receives rx
+	   sequentially. The leading NULL skip below is a full-duplex artifact
+	   (byte clocked in while addr is sent) and would shift the read by one
+	   byte in half-duplex, corrupting every register read. Read len bytes
+	   directly. Requires duplex=<2048> (SPI_HALF_DUPLEX) on the DT node. */
 	struct spi_buf rx_buf[] = {
-		{ .buf = NULL, .len = sizeof(addr), },
 		{ .buf = value, .len = len, },
 	};
 	const struct spi_buf_set rx = { .buffers = rx_buf, .count = ARRAY_SIZE(rx_buf) };
