@@ -58,23 +58,40 @@ static int (*const async_init_fn[ASYNC_INIT_STEP_COUNT])(const struct device *de
 
 //////// Function definitions //////////
 
+/* Manual 3-wire SPI CS control + timing (mirror DoctorWangWang fork). */
+#define T_SRAD 4      /* us: address-to-data delay, >=2us datasheet */
+#define T_NCS_SCLK 1  /* us: CS-to-SCLK setup/hold */
+
+static int spi_cs_ctrl(const struct device *dev, bool enable) {
+	const struct pixart_config *config = dev->config;
+	int err;
+	if (!enable) {
+		k_busy_wait(T_NCS_SCLK);
+	}
+	err = gpio_pin_set_dt(&config->cs_gpio, (int)enable);
+	if (err) {
+		LOG_ERR("SPI CS ctrl failed");
+	}
+	if (enable) {
+		k_busy_wait(T_NCS_SCLK);
+	}
+	return err;
+}
+
 static int pmw3610_read(const struct device *dev, uint8_t addr, uint8_t *value, uint8_t len) {
 	const struct pixart_config *cfg = dev->config;
-	/* Single full-duplex transceive (no CS hold / separate read -> avoids
-	   nRF SPIM blocking). Two dummy bytes are clocked out after the
-	   register/MOTION_BURST address to provide the PMW3610 T_SRAD delay
-	   (~8us at 2 MHz, >= the ~2us required) before the data is sampled.
-	   Without this delay the sensor returns stale/garbage deltas -> cursor
-	   drift. */
-	uint8_t tx_bytes[] = { addr, 0x00, 0x00 };
-	const struct spi_buf tx_buf = { .buf = tx_bytes, .len = sizeof(tx_bytes) };
+	int err = spi_cs_ctrl(dev, true);
+	if (err) { return err; }
+	const struct spi_buf tx_buf = { .buf = &addr, .len = sizeof(addr) };
 	const struct spi_buf_set tx = { .buffers = &tx_buf, .count = 1 };
-	struct spi_buf rx_buf[] = {
-		{ .buf = NULL, .len = sizeof(tx_bytes) },
-		{ .buf = value, .len = len },
-	};
-	const struct spi_buf_set rx = { .buffers = rx_buf, .count = ARRAY_SIZE(rx_buf) };
-	return spi_transceive_dt(&cfg->spi, &tx, &rx);
+	err = spi_write_dt(&cfg->spi, &tx);
+	if (err) { spi_cs_ctrl(dev, false); return err; }
+	k_busy_wait(T_SRAD);
+	struct spi_buf rx_buf = { .buf = value, .len = len };
+	const struct spi_buf_set rx = { .buffers = &rx_buf, .count = 1 };
+	err = spi_read_dt(&cfg->spi, &rx);
+	spi_cs_ctrl(dev, false);
+	return err;
 }
 
 static int pmw3610_read_reg(const struct device *dev, uint8_t addr, uint8_t *value) {
@@ -83,10 +100,14 @@ static int pmw3610_read_reg(const struct device *dev, uint8_t addr, uint8_t *val
 
 static int pmw3610_write_reg(const struct device *dev, uint8_t addr, uint8_t value) {
 	const struct pixart_config *cfg = dev->config;
+	int err = spi_cs_ctrl(dev, true);
+	if (err) { return err; }
 	uint8_t write_buf[] = {addr | SPI_WRITE_BIT, value};
 	const struct spi_buf tx_buf = { .buf = write_buf, .len = sizeof(write_buf), };
 	const struct spi_buf_set tx = { .buffers = &tx_buf, .count = 1, };
-	return spi_write_dt(&cfg->spi, &tx);
+	err = spi_write_dt(&cfg->spi, &tx);
+	spi_cs_ctrl(dev, false);
+	return err;
 }
 
 static int pmw3610_write(const struct device *dev, uint8_t reg, uint8_t val) {
@@ -589,6 +610,15 @@ static int pmw3610_init(const struct device *dev) {
 		return -ENODEV;
 	}
 
+	if (!device_is_ready(config->cs_gpio.port)) {
+		LOG_ERR("CS GPIO not ready");
+		return -ENODEV;
+	}
+	if (gpio_pin_configure_dt(&config->cs_gpio, GPIO_OUTPUT_INACTIVE)) {
+		LOG_ERR("Cannot configure CS GPIO");
+		return -EIO;
+	}
+
     // init device pointer
     data->dev = dev;
 
@@ -693,7 +723,7 @@ static const struct sensor_driver_api pmw3610_driver_api = {
 #define PMW3610_DEFINE(n)                                                                          \
     static struct pixart_data data##n;                                                             \
     static const struct pixart_config config##n = {                                                \
-		.spi = SPI_DT_SPEC_INST_GET(n, PMW3610_SPI_MODE, 0),		                               \
+		.spi = { .bus = DEVICE_DT_GET(DT_INST_BUS(n)), .config = { .frequency = DT_INST_PROP(n, spi_max_frequency), .operation = PMW3610_SPI_MODE, .slave = DT_INST_REG_ADDR(n) } }, .cs_gpio = SPI_CS_GPIOS_DT_SPEC_GET(DT_DRV_INST(n)),		                               \
         .irq_gpio = GPIO_DT_SPEC_INST_GET(n, irq_gpios),                                           \
         .cpi = DT_PROP(DT_DRV_INST(n), cpi),                                                       \
         .swap_xy = DT_PROP(DT_DRV_INST(n), swap_xy),                                               \
