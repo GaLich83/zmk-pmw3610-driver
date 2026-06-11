@@ -396,6 +396,23 @@ static int pmw3610_async_init_configure(const struct device *dev) {
         return err;
     }
 
+    /*
+     * Final motion-register flush. The config writes above
+     * (set_cpi / set_performance / set_downshift) can re-arm the
+     * motion-detected bit with stale accumulated deltas. Without this,
+     * the first IRQ after init delivers that residue as a phantom jump
+     * (persistent up-left drift on the first touch after boot). Re-read
+     * 0x02-0x05 once more so the first real report carries fresh deltas.
+     */
+    for (uint8_t reg = 0x02; (reg <= 0x05) && !err; reg++) {
+        uint8_t buf[1];
+        err = pmw3610_read_reg(dev, reg, buf);
+    }
+    if (err) {
+        LOG_ERR("Final motion flush failed");
+        return err;
+    }
+
     return 0;
 }
 
