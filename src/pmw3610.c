@@ -60,18 +60,26 @@ static int (*const async_init_fn[ASYNC_INIT_STEP_COUNT])(const struct device *de
 
 static int pmw3610_read(const struct device *dev, uint8_t addr, uint8_t *value, uint8_t len) {
 	const struct pixart_config *cfg = dev->config;
+	/* PMW3610 register/burst read = send address, wait T_SRAD, then clock
+	   data. Separate write + read (CS held via SPI_HOLD_ON_CS, released at
+	   the end) instead of one transceive, so the mandatory T_SRAD delay can
+	   be inserted. A combined transceive clocks data immediately after the
+	   address (no T_SRAD) and drives the shared 3-wire line during the data
+	   phase -> corrupted deltas / cursor drift. Mirrors the working
+	   DoctorWangWang fork reg_read. */
 	const struct spi_buf tx_buf = { .buf = &addr, .len = sizeof(addr) };
 	const struct spi_buf_set tx = { .buffers = &tx_buf, .count = 1 };
-	/* Half-duplex (3-wire SPI): nRF SPIM sends tx, then receives rx
-	   sequentially. The leading NULL skip below is a full-duplex artifact
-	   (byte clocked in while addr is sent) and would shift the read by one
-	   byte in half-duplex, corrupting every register read. Read len bytes
-	   directly. Requires duplex=<2048> (SPI_HALF_DUPLEX) on the DT node. */
-	struct spi_buf rx_buf[] = {
-		{ .buf = value, .len = len, },
-	};
-	const struct spi_buf_set rx = { .buffers = rx_buf, .count = ARRAY_SIZE(rx_buf) };
-	return spi_transceive_dt(&cfg->spi, &tx, &rx);
+	int err = spi_write_dt(&cfg->spi, &tx);
+	if (err) {
+		spi_release_dt(&cfg->spi);
+		return err;
+	}
+	k_busy_wait(4); /* T_SRAD: >=2us per datasheet, 4us margin */
+	const struct spi_buf rx_buf = { .buf = value, .len = len };
+	const struct spi_buf_set rx = { .buffers = &rx_buf, .count = 1 };
+	err = spi_read_dt(&cfg->spi, &rx);
+	spi_release_dt(&cfg->spi);
+	return err;
 }
 
 static int pmw3610_read_reg(const struct device *dev, uint8_t addr, uint8_t *value) {
@@ -83,7 +91,9 @@ static int pmw3610_write_reg(const struct device *dev, uint8_t addr, uint8_t val
 	uint8_t write_buf[] = {addr | SPI_WRITE_BIT, value};
 	const struct spi_buf tx_buf = { .buf = write_buf, .len = sizeof(write_buf), };
 	const struct spi_buf_set tx = { .buffers = &tx_buf, .count = 1, };
-	return spi_write_dt(&cfg->spi, &tx);
+	int err = spi_write_dt(&cfg->spi, &tx);
+	spi_release_dt(&cfg->spi);
+	return err;
 }
 
 static int pmw3610_write(const struct device *dev, uint8_t reg, uint8_t val) {
@@ -685,7 +695,7 @@ static const struct sensor_driver_api pmw3610_driver_api = {
 // PM_DEVICE_DT_INST_DEFINE(n, pmw3610_pm_action);
 
 #define PMW3610_SPI_MODE (SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_MODE_CPOL | \
-                        SPI_MODE_CPHA | SPI_TRANSFER_MSB)
+                        SPI_MODE_CPHA | SPI_TRANSFER_MSB | SPI_HOLD_ON_CS | SPI_LOCK_ON)
 
 #define PMW3610_DEFINE(n)                                                                          \
     static struct pixart_data data##n;                                                             \
